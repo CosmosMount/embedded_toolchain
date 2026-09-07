@@ -10,15 +10,23 @@
 
 ## 行为
 
-1. 查找 PATH、常见安装目录中的六种工具。Windows 还读取卸载注册表中的安装目录；macOS 搜索 Applications 和 Homebrew 目录。
-2. 打印彩色状态表、已有工具完整路径、安装目标和目录。发现任意版本即跳过安装，不升级、不降级。已有工具的发现基于可执行文件位置，不启动已有程序获取版本。
-3. 选择 `I` 安装缺失项并补全 PATH，`R` 更换目标目录，`Q` 退出。单个工具失败不会中止其余工具的处理。
+1. 默认扫描所有已挂载文件系统盘/根目录，包含用户自定义位置、隐藏目录和挂载的数据卷。遇到无法访问的目录，先列出，再询问是否通过 UAC / sudo 提权重试。
+2. **扫描阶段只读目录及文件信息，不启动任何候选程序。** CubeMX 只检测是否已安装，已有安装直接跳过版本检查。其他工具在扫描结果中标记为“版本待检查”，用户授权进入安装阶段后才检查版本/可运行性；CMake 和 Arm 必须符合指定版本。
+3. 选择 `I` 安装、替换旧版本并补全 PATH，`R` 更换目标目录，`Q` 退出。**先确保新版本安装验证成功，再卸载所有已检测到的不合格旧副本**，最后移除旧 PATH 条目并启用新目录。找到合格副本时也会清理已检测到的不合格副本；CubeMX 不参与旧版本清理。卸载失败/被取消会标记未完成，单个工具失败不会中止其余工具的处理。
 4. 新下载的命令行工具执行 `--version` 验证；CMake/Arm 还核对目标版本。最后输出逐项结果，必需工具或 PATH 配置失败时返回退出码 `1`。
-5. 重复运行跳过已发现的安装，PATH 不重复追加。失败留下的 `.staging-*` / `.staging.*` 目录不参与发现；这些目录保留下载和诊断材料，不自动清理。
+5. 重复运行复用已发现的合格版本，选中的工具目录移到脚本进程 PATH 前面，持久化配置去重。失败留下的 `.staging-*` / `.staging.*` 目录不参与发现；这些目录保留下载和诊断材料，不自动清理。
 
 这是无需额外 UI 依赖的轻量终端界面：仅文字前景色的计划表、菜单、扫描状态和汇总，不设置彩色背景、不清屏。Windows 禁用可能带背景色的 PowerShell 进度面板，改用普通状态文字；Unix 下载使用 curl 文本进度。为避免各平台终端编码问题，界面使用英文；非彩色终端可正常使用，Unix 支持 `NO_COLOR`。
 
-交互终端中，安装或只读扫描结束后默认保留输出，等待按 Enter 退出；失败结果也会保留。按 Enter 后输出仍在终端历史中，但若终端由外部启动器临时创建，窗口是否关闭取决于启动器。Windows 使用 `-NoPause`、Linux/macOS 使用 `--no-pause` 可关闭等待；输入重定向时不等待。外部安装器及包管理器的界面样式由相应程序控制。
+目录遍历期间约每秒输出一条普通文字状态，包括耗时、已遍历目录数、候选工具数、权限错误数和当前目录；发现候选工具立即输出完整路径，结束后输出 `SCAN DONE` 汇总。提权重扫同样显示进度，Windows 会通过内存命名管道将隐藏的提权扫描器输出转回当前窗口。计数表示当前扫描轮次的遍历记录，不是假定的完成百分比；Unix 的 `errors` 包含权限错误，并在每个扫描根完成后输出收集到的错误。若文件系统读取阻塞，当前目录会保留在最后一条状态中。
+
+```text
+[SCAN 8s] directories=1240 candidates=2 denied=3 errors=3 | /opt/toolchains
+[CANDIDATE] /opt/toolchains/arm/bin/arm-none-eabi-gcc
+[SCAN DONE 15s] directories=2381 candidates=6 denied=3 errors=3
+```
+
+交互终端中，安装或仅扫描结束后默认保留输出，等待按 Enter 退出；失败结果也会保留。按 Enter 后输出仍在终端历史中，但若终端由外部启动器临时创建，窗口是否关闭取决于启动器。Windows 使用 `-NoPause`、Linux/macOS 使用 `--no-pause` 可关闭等待；输入重定向时不等待。外部安装器及包管理器的界面样式由相应程序控制。
 
 ## 版本与安装策略
 
@@ -29,7 +37,11 @@
 | Git | 安装时可用版本 | Git for Windows 官方 MinGit ZIP | 系统包管理器 / Homebrew |
 | Ninja | 安装时可用版本 | 官方 GitHub release ZIP | 系统包管理器 / Homebrew |
 | OpenOCD | 安装时可用版本 | xPack OpenOCD release ZIP | 系统包管理器 / Homebrew |
-| CubeMX | **6.18.0**，可跳过 | 本地官方安装器交互安装 | 本地官方安装器交互安装 |
+| CubeMX | 缺失时安装分享包 **6.18.0**；已有任意版本跳过 | 下载 Windows ZIP、解压、启动安装向导 | Linux x64 ZIP / macOS ARM64 tar.gz、解压、启动向导 |
+
+匹配规则：CMake 必须是 **3.22.6**，其他 3.22 补丁版也会列为需替换；Arm 同时核对发行标识 **13.3.rel1** 和 GCC **13.3.1**，不把任意 GCC 13 当成符合要求。CubeMX 不检查版本。Git、Ninja 和 OpenOCD 没有指定目标版本，因此接受能返回正常版本信息的已有版本，不强制追逐最新版本。
+
+其他命令行工具使用 `--version` 检测，主进程超时约 10 秒会判为不可验证。CubeMX 不启动程序读取版本，也不再要求用户输入 About 版本。
 
 Windows MinGit 提供命令行 Git，不包含 Git Bash 和 Git GUI。Windows 所有新下载的命令行工具安装在指定目录，默认 `D:\embedded_toolchain`。默认目录无法创建或写入时，要求输入其他绝对路径。
 
@@ -50,7 +62,7 @@ powershell -NoProfile -File .\install-windows.ps1
 # 指定目录，同时扫描已有的自定义软件目录
 .\install-windows.ps1 -InstallDir 'E:\Dev Tools' -SearchRoot 'E:\SDK','C:\CustomTools'
 
-# 只读扫描：不会创建目录、下载、启动已有工具或修改 PATH
+# 只读扫描：不启动候选程序，不创建临时文件，不安装、不改权限或 PATH
 .\install-windows.ps1 -ScanOnly
 .\install-windows.ps1 -DeepScan -ScanOnly
 ```
@@ -76,11 +88,23 @@ bash install-macos.sh
 bash install-macos.sh --deep-scan --scan-only
 ```
 
-建议以普通用户启动，脚本会在系统包安装时单独使用 sudo。Unix 下载需要已有 `curl`、`tar` 和 SHA256 工具（`sha256sum` 或 `shasum`）；解压 Arm 归档需要 tar 支持 xz，部分 Linux 需安装 `xz-utils`。
+建议以普通用户启动，脚本会在系统包安装/卸载时单独使用 sudo。Unix 下载需要已有 `curl`、`tar` 和 SHA256 工具（`sha256sum` 或 `shasum`）；解压 Arm 归档需要 tar 支持 xz，部分 Linux 需安装 `xz-utils`。Linux 的 CubeMX ZIP 解压还需要 `unzip`。
 
 ## CubeMX
 
-ST 登录、许可接受与 GUI 安装由用户处理。未检测到 CubeMX 时，可以输入已从 ST 下载并解压的 **6.18.0** 安装器路径，也可直接回车跳过。不会猜测 ST 的受认证下载地址，也不会替用户接受许可。
+脚本已接入以下三个用户提供的分享包，并通过分享页面核实文件名：
+
+| 平台 | 分享包 |
+| --- | --- |
+| Windows x64 | [SetupSTM32CubeMX-6.18.0-Win-x86_64.zip](https://hkustgz-my.sharepoint.com/:u:/g/personal/pnx_hkust-gz_edu_cn/IQAhhy-uMdyhTK8LwSanKsiNAShn5shcsRkNmBqSKGvIrZw?e=cpKvAb) |
+| macOS Apple Silicon | [SetupSTM32CubeMX-6.18.0-Mac-aarch64.tar.gz](https://hkustgz-my.sharepoint.com/:u:/g/personal/pnx_hkust-gz_edu_cn/IQBi0ZlmZkFcSbUxlVfa4GUTAdpQuEDETtKtoDKH_uyoZgg?e=Nb34fh) |
+| Linux x64 | [SetupSTM32CubeMX-6.18.0-Lin-x86_64.zip](https://hkustgz-my.sharepoint.com/:u:/g/personal/pnx_hkust-gz_edu_cn/IQAXX5o6ZdrcSorLXnMmoY1vAdAB2Ce_DfWZJ_dW-ImdNE4) |
+
+检测不到 CubeMX 时自动请求平台对应的分享链接（附加 `download=1`）、校验压缩包可读性、解压并找到安装器，保留安装器所需的同级 JRE，然后启动安装向导。Linux 会为解压出的安装器添加当前用户执行权限。**下载和解压自动完成，许可接受与向导中的设置仍由用户操作；尚未验证此版安装器的静默安装参数，因此不声称无人值守安装。**
+
+在另一台电脑直接下载的前提是分享权限允许该电脑的用户下载，且链接未过期。未授权、登录页或非压缩包响应不会作为程序执行；会提示输入已手动下载的本地压缩包，也可跳过。脚本不会导出本机登录 Cookie。分享包尚未下载进行内容/签名校验，也没有可供固定校验的 SHA256。
+
+没有提供 macOS Intel / Linux ARM64 的 CubeMX 包，这两个平台会提示提供兼容的本地安装器或跳过；不会错误使用另一种架构的包。
 
 可提前指定安装器：
 
@@ -93,15 +117,40 @@ bash install-linux.sh --cubemx-installer "$HOME/Downloads/SetupSTM32CubeMX-6.18.
 bash install-macos.sh --cubemx-installer "$HOME/Downloads/SetupSTM32CubeMX-6.18.0.app"
 ```
 
-上面是路径示例，以实际解压文件为准。Linux 安装器需要已有执行权限和图形桌面；macOS 使用 `open -W` 打开安装器。启动前要求确认版本为 6.18.0，安装完成后输入实际 `STM32CubeMX.exe` / `STM32CubeMX` 可执行文件路径来补全 PATH。GUI 软件不强行执行通用 `--version`，所以该版本由用户核对；没有提供安装后的路径会标记 **UNVERIFIED**，不会假报安装成功。已有任意版本 CubeMX 仍按规则跳过。
+上面是路径示例，以实际解压文件为准。Linux 需要图形桌面；macOS 使用 `open -W` 打开安装器。向导结束后扫描常用安装位置以补全 PATH，未找到时才要求输入实际 `STM32CubeMX.exe` / `STM32CubeMX` 路径。没有找到或提供安装后的路径会标记 **UNVERIFIED**，不会假报安装成功。
+
+## 旧版本卸载
+
+- 新版本未安装验证成功时，不删除旧安装。
+- Windows 优先使用注册表中与工具及安装目录匹配的 MSI/EXE 卸载器；Linux 根据文件所属软件包使用 apt/dnf/zypper/pacman；macOS 识别 Homebrew Cellar 后使用 brew uninstall。包管理器会保留依赖变更确认，不使用强制忽略依赖选项。
+- 脚本新装的便携目录记录归属标记，后续可自动识别删除边界。对于没有卸载记录/归属标记的旧便携安装，必须输入确切的独立安装根目录；脚本校验旧可执行文件位于其中、新安装位于其外，拒绝系统根、用户根和包含其他已知工具的共享目录，不根据一个 `bin` 文件夹猜测整个安装位置。
+- 删除目录是永久删除，不保留旧安装备份。拒绝指定根目录、权限不足、包管理器取消、文件仍占用或卸载需重启时，会报告未完成；不会悄悄保留旧版本并报告成功。Alpine 的已有包归属无法安全自动转换为删除命令时，会要求先通过原包管理器卸载后重试。
+- IDE 内嵌工具、共享 SDK 和未知安装布局可能需要通过其原始安装方式卸载，不会递归删除整个 IDE。无法访问的目录内仍可能存在未发现的旧版本，这部分不会被声称已清除。
 
 ## PATH 与扫描边界
 
-- Windows 合并到当前用户 PATH，并更新安装脚本进程的 PATH；不使用可能截断值的 `setx`。已打开的终端和父应用可能需要重新启动。
-- Linux/macOS 生成安装目录下的 `env.sh`，并向 Bash 的登录配置、`.bashrc`、Zsh 的 `.zshrc` / `.zprofile` 添加幂等加载语句。已有配置不覆盖；当前终端可按输出提示 `source`。Fish 等其他 shell 不在自动持久化支持范围内。
-- 默认扫描常用目录，不保证找到任意磁盘任意位置的工具。用 `-SearchRoot` / `--search-root` 添加自定义目录，或用 `-DeepScan` / `--deep-scan` 扩大扫描。
-- Windows 深度扫描可访问的文件系统盘；Unix 深度扫描 `/`，排除虚拟目录和 `/Volumes`、`/mnt`、`/media` 等挂载入口。没有读取权限的目录跳过，目录符号链接不递归跟随。扫描不是完整性证明；离线磁盘、容器内工具和无法访问的目录无法保证发现。
-- 文件名必须对应标准可执行文件名；仅安装器、压缩包、注册表残留不算已安装。默认优先 PATH 上的版本，其次使用扫描找到的第一份。不启动已有二进制意味着损坏的旧安装也可能被识别；请自行移走损坏安装后重试。
+权限按阶段交互授权：
+
+| 范围 | 扫描阶段 | 安装阶段 |
+| --- | --- | --- |
+| 已有目录、文件信息 | 只读；不可访问时可选择只读辅助进程提权重试 | 按需要读取 |
+| 指定安装目录 | 不创建、不写入、不修改 ACL | 用户确认后允许创建、下载、解压及保存记录；不可写时可选择仅为该目录授予当前用户写权限 |
+| 版本检查程序 | 不执行 | 单独确认后执行 `--version`，临时输出放在指定安装目录内 |
+| 旧安装目录、系统包文件及数据库 | 不修改 | 各自说明范围并询问，拒绝则对应操作未完成 |
+| 用户 PATH、Shell 启动文件、机器 PATH | 不修改 | 分别授权；拒绝不会跳过权限要求继续写入 |
+
+Windows 的安装目录授权使用 UAC 为当前用户添加该目录的 Modify ACL，不修改父目录或递归改写其他目录；Linux 使用 `setfacl` 添加当前用户的目录 rwx 权限，macOS 使用目录 ACL。Linux 缺少 `setfacl` 时不自动改成 chown 或放宽全局权限，可改选已有写权限的目录。扫描阶段不调用这些授权写操作，扫描辅助进程不执行磁盘日志或结果文件写入。
+
+这是脚本的操作范围约束，**不是操作系统层面的只读 token 或沙箱**：UAC/sudo 身份本身具有更高权限，操作系统仍可能记录认证、审计或访问时间。外部版本程序、包管理器和 CubeMX 安装器也不是沙箱进程，因此执行它们属于单独确认的安装阶段，不能保证第三方程序只写指定目录。若需要内核强制限制第三方程序，应在受限容器/虚拟机中另行验收。
+
+- Windows 移除已卸载工具的旧用户 PATH 条目，将新目录置前，并更新脚本进程 PATH；不使用 `setx`。若旧条目位于机器 PATH，会单独请求 UAC 清理；拒绝或失败会报告未完成。`removed-paths.json` 记录待清理条目，便于重试。另生成 `Activate-Toolchain.ps1` 供当前 PowerShell 终端使用；其他未处理的系统 PATH 冲突会明确提示。重启已打开的终端和父应用后再构建。
+- Linux/macOS 重建安装目录内的 `env.sh`，先剔除记录在 `removed-paths.txt` 中的旧工具专属目录，再启用新目录；Bash/Zsh 启动配置自动加载它。不会从 PATH 中移除 `/usr/bin` 等共享系统目录，也不会猜测改写用户自定义 shell 代码。当前终端可按提示 `source`。Fish 等其他 shell 不在自动持久化支持范围内。
+- 默认进行完整目录发现，`-DeepScan` / `--deep-scan` 保留为兼容参数。用 `-SearchRoot` / `--search-root` 添加额外根目录、UNC 路径或需要显式跟随的目录链接。全盘扫描尤其是在机械盘或网络挂载上可能耗时较长。
+- Windows 扫描所有 PowerShell 可见文件系统盘，并跟随可解析的 junction/符号链接目标，按目标路径去重，避免循环；无法解析的链接会列出。Unix 从 `/` 扫描，包含 `/Volumes`、`/mnt`、`/media` 等挂载入口，仅排除 `/proc`、`/sys`、`/dev`、`/run`、`/private/var/run` 等虚拟/运行时目录与安装暂存目录。Unix 不递归跟随途中遇到的目录链接，真实目标通常通过全盘扫描覆盖；`--search-root` 明确传入的链接会被跟随。
+- 权限错误单独展示并提供 `[y/N]` 选择。Windows 启动仅枚举目录的 UAC 子进程，通过仅允许当前用户和管理员访问的内存命名管道返回结果；Linux/macOS 只对固定的 `/usr/bin/find` 使用 sudo，候选路径与错误均通过内存/进程管道传递。扫描不修改 ACL，也不会将后续版本检测和用户配置改为管理员身份执行。拒绝、取消或提权后仍无法读取的目录会保留提示，不能声称已扫描完整。
+- macOS 隐私保护可能需要在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中授权所使用的终端，然后重新扫描。sudo 不会自动授予该权限。离线磁盘、未挂载镜像、容器内部和操作系统仍禁止访问的目录无法保证发现。
+- 文件名必须对应标准可执行文件名；仅安装器、压缩包、注册表残留不算已安装。默认优先 PATH 上符合目标的版本，其次使用扫描找到的第一份合格版本；所有发现的副本都会显示检测结果。
+- `-ScanOnly` / `--scan-only` 只列出候选位置；不执行候选程序，不创建扫描临时文件、不下载、不安装或卸载、不修改 ACL 或 PATH。交互模式下仍可能询问只读扫描提权。版本匹配结果必须进入已授权的安装阶段后获得。
 - OpenOCD USB 驱动、Linux udev 规则和设备权限需要按调试器另行配置，本脚本不修改这些设置。
 
 ## 下载校验与验证记录
@@ -112,6 +161,8 @@ Arm 历史下载站点入口已发生迁移，历史二进制地址可能受限�
 
 开发验证限于 PowerShell 语法解析、Bash `-n` 静态语法检查和文件审查；没有进行真实安装、网络安装包下载、跨平台运行、硬件烧录测试。因此脚本仍需在你授权的目标环境做首次安装验收。
 
+首次运行建议在可恢复测试环境验收：已有 CubeMX 不检查版本/不下载；无 CubeMX 时平台匹配、登录页回退、压缩包解压和向导；新版本安装失败时保留旧工具；新版本成功后旧 MSI/包管理器/便携目录清理；取消卸载时明确失败；共享目录拒绝递归删除；新终端 PATH 剔除旧目录并启用新目录。上述场景尚未在本机执行。
+
 官方来源：
 
 - [CMake 3.22 官方归档](https://cmake.org/files/v3.22/)
@@ -120,3 +171,4 @@ Arm 历史下载站点入口已发生迁移，历史二进制地址可能受限�
 - [Git for Windows](https://github.com/git-for-windows/git/releases/latest)
 - [Ninja](https://github.com/ninja-build/ninja/releases/latest)
 - [xPack OpenOCD](https://github.com/xpack-dev-tools/openocd-xpack/releases/latest)
+- [Apple 隐私与安全性、完全磁盘访问权限说明](https://support.apple.com/guide/mac-help/change-privacy-security-settings-on-mac-mchl211c911f/mac)
