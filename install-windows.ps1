@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#! Run explicitly with PowerShell. No administrator rights needed for portable tools. !#>
 [CmdletBinding()]
 param(
@@ -34,7 +34,7 @@ function Write-UiStatus([string]$Message) {
 }
 function Wait-BeforeExit {
     if (-not $NoPause -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
-        [void](Read-Ui 'Finished. Press Enter to exit (output will remain in terminal history)')
+        [void](Read-Ui '操作结束。按 Enter 退出（输出仍保留在终端历史中）')
     }
 }
 trap {
@@ -64,7 +64,7 @@ $versionsChecked = $false
 $writeAuthorized = $false
 function Confirm-WriteScope([string]$Scope) {
     if (-not $writeAuthorized) { throw 'Write access has not been authorized for the installation phase.' }
-    if ((Read-Ui "Allow this additional write scope: $Scope [y/N]") -ne 'y') { throw "Write scope declined: $Scope" }
+    if ((Read-Ui "是否允许以下额外写入范围：$Scope [y=是 / N=否，默认 N]") -ne 'y') { throw "Write scope declined: $Scope" }
 }
 function Banner([string]$Text) {
     Write-Ui "`n+------------------------------------------------------------+" 'STEP' -Raw
@@ -197,7 +197,7 @@ function Find-Tools {
         $scan.Denied | ForEach-Object { Write-Host "  $_" }
         $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         if (-not $isAdmin -and -not [Console]::IsInputRedirected) {
-            $consent = Read-Ui 'Retry these directories using UAC? Only directory discovery is elevated [y/N]'
+            $consent = Read-Ui '是否通过 UAC 提权重试这些目录？提权仅用于只读目录扫描 [y=是 / N=否，默认 N]'
             if ($consent -eq 'y') {
                 # Memory-only IPC: no temporary input, output or progress files.
                 $pipe = $null; $reader = $null; $writer = $null
@@ -309,14 +309,14 @@ function Show-Plan {
     foreach ($name in $obsolete.Keys) { foreach ($path in @($obsolete[$name])) { if ($path) { Write-Ui "[REMOVE AFTER REPLACEMENT] $path" 'WARN' -Raw } } }
 }
 function Select-ForceReinstall {
-    Banner 'Optional: reinstall matching tools / migrate old directory names'
-    Write-Ui 'Enter Y per tool to replace every discovered copy, including matching versions. Enter skips.'
-    Write-Ui 'CubeMX retains its existing-installation skip policy. Its setup wizard manages installation paths.'
+    Banner '可选操作：强制重装版本正确的工具／迁移旧目录'
+    Write-Ui '逐项输入 Y 可替换该工具的所有已发现副本，包括版本正确的副本；直接按 Enter 跳过。'
+    Write-Ui 'CubeMX 已安装时仍跳过；其安装目录由安装向导管理。'
     foreach ($name in $names) {
         if ($name -eq 'STM32CubeMX' -or -not $found.ContainsKey($name)) { continue }
         $folder = if ($name -eq 'arm-none-eabi-gcc') { 'arm-none-eabi' } else { $name }
-        Write-Ui "Current: $($found[$name])" 'INFO'
-        if ((Read-Ui "Force reinstall $name into $(Join-Path $InstallDir $folder)? [y/N]") -ne 'y') { continue }
+        Write-Ui "当前路径：$($found[$name])" 'INFO'
+        if ((Read-Ui "是否将 $name 强制重装到 $(Join-Path $InstallDir $folder)？[y=是 / N=否，默认 N]") -ne 'y') { continue }
         $forceTools[$name] = $true
         $obsolete[$name] = @(@($obsolete[$name]) + @($discovered | Where-Object { [IO.Path]::GetFileNameWithoutExtension($_) -eq $name }) | Where-Object { $_ } | Select-Object -Unique)
         $found.Remove($name)
@@ -339,7 +339,7 @@ function Remove-OldTool([string]$Name, [string]$NewExecutable) {
             $registeredRoot = [IO.Path]::GetFullPath($entry.InstallLocation).TrimEnd('\') + '\'
             if ($NewExecutable.StartsWith($registeredRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Old uninstaller would also own the selected new installation.' }
             Write-Host "Uninstall old package: $($entry.DisplayName) ($old)"
-            Confirm-WriteScope "uninstall $($entry.DisplayName) from $registeredRoot and update its installer records"
+            Confirm-WriteScope "从 $registeredRoot 卸载 $($entry.DisplayName) 并更新安装记录"
             if ($entry.WindowsInstaller -eq 1 -and $entry.PSChildName -match '^\{[A-Fa-f0-9-]+\}$') {
                 $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/x', $entry.PSChildName, '/norestart') -Wait -PassThru
             } else {
@@ -367,7 +367,7 @@ function Remove-OldTool([string]$Name, [string]$NewExecutable) {
             }
             if (-not $root) {
                 Write-Host "Unregistered old tool: $old"
-                $root = Read-Ui "Enter the exact directory belonging ONLY to $Name to permanently remove it (empty = replacement incomplete)"
+                $root = Read-Ui "请输入仅属于 $Name 的独立目录完整路径，以永久删除该目录（留空则替换未完成）"
                 if (-not $root) { throw "Old installation not removed: $old" }
             }
             $root = (Get-Item -LiteralPath $root).FullName.TrimEnd('\')
@@ -381,7 +381,7 @@ function Remove-OldTool([string]$Name, [string]$NewExecutable) {
                 @($children | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -gt 0) { throw "Remove linked installation through its original package manager: $root" }
             if (@($children | Where-Object { -not $_.PSIsContainer -and $_.Extension -eq '.exe' -and $names -contains $_.BaseName -and $_.BaseName -ne $Name }).Count -gt 0) { throw "Shared tool directory must not be removed recursively: $root" }
             Write-Host "Removing verified old installation directory: $root"
-            Confirm-WriteScope "permanently delete this old installation directory: $root"
+            Confirm-WriteScope "永久删除此旧安装目录：$root"
             Remove-Item -LiteralPath $root -Recurse -Force
         }
         if (Test-Path -LiteralPath $old) { throw "Old executable still exists (possibly pending reboot): $old" }
@@ -396,7 +396,7 @@ function Add-ToolPath([string]$Executable) {
     $env:PATH = (@($dir) + $remaining) -join ';'
 }
 function Save-Path {
-    Confirm-WriteScope 'update the current user PATH registry value (machine PATH changes are requested separately)'
+    Confirm-WriteScope '更新当前用户的 PATH 注册表值（系统级 PATH 修改会另行询问）'
     $removedFile = Join-Path $InstallDir 'removed-paths.json'
     if (Test-Path -LiteralPath $removedFile) {
         foreach ($dir in @(Get-Content -LiteralPath $removedFile -Raw | ConvertFrom-Json)) { if ($dir -and -not $removedDirs.Contains($dir)) { $removedDirs.Add($dir) } }
@@ -412,7 +412,7 @@ function Save-Path {
     if ($machineNew -ne $machine) {
         Write-Host 'Obsolete tool directories also occur in the machine PATH.'
         $removedDirs | ForEach-Object { Write-Host "  Remove PATH entry: $_" }
-        if ((Read-Ui 'Use UAC to remove these obsolete PATH entries for all users? [y/N]') -ne 'y') { throw 'Machine PATH cleanup declined; replacement is incomplete.' }
+        if ((Read-Ui '是否通过 UAC 移除所有用户共用的这些旧 PATH 条目？[y=是 / N=否，默认 N]') -ne 'y') { throw 'Machine PATH cleanup declined; replacement is incomplete.' }
         $dirs64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @($removedDirs.ToArray()) -Compress)))
         $helper = "`$ErrorActionPreference='Stop'; `$dirs = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$dirs64')) | ConvertFrom-Json; `$old=[Environment]::GetEnvironmentVariable('Path','Machine'); `$new=(`$old -split ';' | Where-Object { `$dirs -notcontains [Environment]::ExpandEnvironmentVariables(`$_) }) -join ';'; [Environment]::SetEnvironmentVariable('Path',`$new,'Machine')"
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($helper))
@@ -521,14 +521,14 @@ $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 Find-Tools
 Show-Plan
 if ($ScanOnly) { Wait-BeforeExit; exit 0 }
-$answer = Read-Ui 'Enter I to install/reinstall required tools and repair PATH, R to change destination, or Q to quit'
+$answer = Read-Ui '输入 I 安装／重装所需工具并修复 PATH，输入 R 修改目标目录，输入 Q 退出'
 if ($answer -eq 'R') {
-    $InstallDir = Read-Ui 'Absolute installation directory'
+    $InstallDir = Read-Ui '请输入安装目录的绝对路径'
     if (-not [IO.Path]::IsPathRooted($InstallDir)) { throw 'An absolute path is required.' }
     $InstallDir = [IO.Path]::GetFullPath($InstallDir)
     Find-Tools
     Show-Plan
-    $answer = Read-Ui 'Enter I to continue, anything else to quit'
+    $answer = Read-Ui '输入 I 继续，输入其他内容退出'
 }
 if ($answer -ne 'I') { Wait-BeforeExit; exit 0 }
 while ($true) {
@@ -539,7 +539,7 @@ while ($true) {
         if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Choose a physical installation path instead of a linked directory.' }
         $cursor = Split-Path -Parent $cursor
     }
-    if ((Read-Ui "Authorize creating/writing ONLY the selected installation directory: $InstallDir ? [y/N]") -ne 'y') { Wait-BeforeExit; exit 0 }
+    if ((Read-Ui "是否授权仅创建／写入所选安装目录：${InstallDir}？[y=是 / N=否，默认 N]") -ne 'y') { Wait-BeforeExit; exit 0 }
     $writeAuthorized = $true
     try {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -549,7 +549,7 @@ while ($true) {
         break
     } catch {
         Write-Ui "Cannot write to $InstallDir : $_" 'WARN'
-        if ((Read-Ui "Use UAC to grant this user Modify access ONLY on $InstallDir (no parent or recursive ACL edits)? [y/N]") -eq 'y') {
+        if ((Read-Ui "是否通过 UAC 仅授予当前用户对 $InstallDir 的修改权限（不修改父目录、不递归修改 ACL）？[y=是 / N=否，默认 N]") -eq 'y') {
             try {
                 $targetLiteral = "'" + $InstallDir.Replace("'", "''") + "'"
                 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -564,18 +564,18 @@ while ($true) {
             } catch { Write-Ui "Selected-directory grant failed: $_" 'ERROR' }
         }
         $writeAuthorized = $false
-        $InstallDir = Read-Ui 'Specify another absolute directory (empty to cancel)'
+        $InstallDir = Read-Ui '请输入另一个目录的绝对路径（留空取消）'
         if (-not $InstallDir) { Wait-BeforeExit; exit 1 }
         if (-not [IO.Path]::IsPathRooted($InstallDir)) { throw 'An absolute path is required.' }
         $InstallDir = [IO.Path]::GetFullPath($InstallDir)
         Find-Tools
     }
 }
-Confirm-WriteScope 'execute discovered command-line tools with --version for installation decisions; external programs are not OS-sandboxed'
+Confirm-WriteScope '运行已发现的命令行工具并传入 --version 以确定安装方案；外部程序不受操作系统沙箱限制'
 Check-DiscoveredVersions
 Select-ForceReinstall
 Show-Plan
-if ($forceTools.Count -gt 0 -and (Read-Ui 'Proceed with this replacement plan and old-copy cleanup? [y/N]') -ne 'y') { Wait-BeforeExit; exit 0 }
+if ($forceTools.Count -gt 0 -and (Read-Ui '是否执行上述替换计划并清理旧副本？[y=是 / N=否，默认 N]') -ne 'y') { Wait-BeforeExit; exit 0 }
 $failed = $false
 foreach ($name in $names) {
     Banner $name
@@ -614,11 +614,11 @@ foreach ($name in $names) {
                 Install-Zip $name $asset.browser_download_url '' $digest
             }
             'STM32CubeMX' {
-                Banner 'CubeMX installation options'
-                Write-Ui '[1] Download/extract and launch the setup wizard' 'INFO' -Raw
-                Write-Ui '[2] Download/extract only (READY; not installed)' 'WARN' -Raw
-                Write-Ui '[3] SKIP CubeMX (default)' 'WARN' -Raw
-                $cubeChoice = Read-Ui 'Choose an option [1/2/3; default 3]'
+                Banner 'CubeMX 安装选项'
+                Write-Ui '[1] 下载、解压并启动安装向导' 'INFO' -Raw
+                Write-Ui '[2] 仅下载、解压（已准备好，尚未安装）' 'WARN' -Raw
+                Write-Ui '[3] 跳过 CubeMX（默认）' 'WARN' -Raw
+                $cubeChoice = Read-Ui '请选择 [1/2/3，默认 3]'
                 if ($cubeChoice -notin @('1', '2')) { $status[$name] = 'SKIPPED (user choice)'; continue }
                 if (-not $CubeMXInstaller) {
                     $cubeWork = Join-Path $InstallDir ('.staging-cubemx-' + [guid]::NewGuid().ToString('N'))
@@ -629,7 +629,7 @@ foreach ($name in $names) {
                         Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $cubeWork 'payload')
                     } catch {
                         Write-Host "Shared download/extraction failed (login, expired link or non-archive response): $_"
-                        $localZip = Read-Ui 'Local downloaded CubeMX ZIP (empty to skip)'
+                        $localZip = Read-Ui '请输入本地已下载的 CubeMX ZIP 安装包路径（留空跳过）'
                         if (-not $localZip) { $status[$name] = 'SKIPPED (shared download unavailable)'; continue }
                         $cubeWork = Join-Path $InstallDir ('.staging-cubemx-' + [guid]::NewGuid().ToString('N'))
                         New-Item -ItemType Directory -Path $cubeWork | Out-Null
@@ -640,17 +640,17 @@ foreach ($name in $names) {
                     $CubeMXInstaller = $setup[0].FullName
                 }
                 if (-not $CubeMXInstaller) { $status[$name] = 'SKIPPED (optional ST login/manual download)'; continue }
-                if ($cubeChoice -eq '2') { $status[$name] = "READY (not installed): $CubeMXInstaller"; Write-Host "Run this installer later: $CubeMXInstaller"; continue }
+                if ($cubeChoice -eq '2') { $status[$name] = "READY (not installed): $CubeMXInstaller"; Write-Host "稍后可运行此安装器： $CubeMXInstaller"; continue }
                 $installer = Get-Item -LiteralPath $CubeMXInstaller
                 if ($installer.Extension -ne '.exe') { throw 'Supply an extracted official .exe installer.' }
-                Write-Host "Launching extracted CubeMX installer. Choose this installation directory in the wizard: $InstallDir\stm32cubemx"
-                Confirm-WriteScope "run the CubeMX installer wizard; authorize its chosen destination and OS registration changes separately from scanning"
+                Write-Host "即将启动已解压的 CubeMX 安装器，请在向导中选择此安装目录： $InstallDir\stm32cubemx"
+                Confirm-WriteScope "运行 CubeMX 安装向导；独立授权其目标目录写入和系统安装注册信息修改，与扫描授权分开"
                 $process = Start-Process -FilePath $installer.FullName -WorkingDirectory $installer.DirectoryName -Wait -PassThru
                 if ($process.ExitCode -ne 0) { throw "CubeMX installer exit code: $($process.ExitCode)" }
                 $cubeRoots = @($InstallDir, "$env:ProgramFiles\STMicroelectronics", "$env:ProgramFiles\STM32CubeMX", "$env:USERPROFILE\STMicroelectronics", "$env:USERPROFILE\STM32CubeMX", 'C:\ST') | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
                 $cubeScan = Scan-Roots $cubeRoots
                 $exePath = @($cubeScan.Items | Where-Object { [IO.Path]::GetFileName($_) -eq 'STM32CubeMX.exe' } | Select-Object -First 1)
-                if ($exePath.Count -gt 0) { $exePath = $exePath[0] } else { $exePath = Read-Ui 'Full path to installed STM32CubeMX.exe (empty to skip PATH setup)' }
+                if ($exePath.Count -gt 0) { $exePath = $exePath[0] } else { $exePath = Read-Ui '请输入已安装的 STM32CubeMX.exe 完整路径（留空则跳过 PATH 设置）' }
                 if (-not $exePath) { $status[$name] = 'UNVERIFIED (installer finished; PATH not configured)'; continue }
                 $exe = Get-Item -LiteralPath $exePath
                 if ($exe.Name -ne 'STM32CubeMX.exe') { throw 'Expected STM32CubeMX.exe.' }

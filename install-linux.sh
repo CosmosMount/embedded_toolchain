@@ -64,7 +64,7 @@ finish() {
         rmdir "$SCAN_WORK" 2>/dev/null || true
     fi
     if [ "${BASH_SUBSHELL:-0}" -eq 0 ] && [ "$NO_PAUSE" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then
-        printf '\nFinished. Press Enter to exit (output will remain in terminal history). '
+        printf '\n操作结束。按 Enter 退出（输出仍保留在终端历史中）. '
         IFS= read -r _finish_reply || true
     fi
     exit "$code"
@@ -91,7 +91,7 @@ ui_status() {
 ask() { printf '\n%s[ASK] %s%s\n  > ' "$M" "$1" "$RESET"; IFS= read -r REPLY || REPLY=''; }
 confirm_write_scope() {
     [ "$WRITE_AUTHORIZED" -eq 1 ] || { echo 'Installation write access has not been authorized.' >&2; return 1; }
-    ask "Allow this additional write scope: $1 [y/N]:"
+    ask "是否允许以下额外写入范围：$1 [y=是 / N=否，默认 N]："
     case "$REPLY" in y|Y) return 0 ;; *) echo "Write scope declined: $1" >&2; return 1 ;; esac
 }
 scan_display() {
@@ -237,7 +237,7 @@ scan() {
     collect_paths 0
     if [ "${SCAN_ERRORS[0]+set}" = set ]; then
         if [ "$(id -u)" -ne 0 ] && [ -t 0 ]; then
-            ask 'Authorize a read-only sudo find retry? No file writes, ACL changes or program probes; OS authentication/audit still applies [y/N]:'
+            ask '是否授权 sudo find 只读重扫？不写入文件、不修改 ACL、不运行候选程序；系统仍可能进行认证和审计 [y=是 / N=否，默认 N]：'
             if [ "$REPLY" = y ] || [ "$REPLY" = Y ]; then
                 if command -v sudo >/dev/null 2>&1; then
                     collect_paths 1
@@ -281,16 +281,16 @@ plan() {
 }
 select_force_reinstall() {
     local i p j exists folder destination
-    banner 'Optional: reinstall matching tools / migrate old directory names'
-    ui_status '[INFO] Enter Y per tool to replace every discovered copy, including matching versions. Enter skips.'
-    ui_status '[INFO] Existing CubeMX is skipped; its setup wizard manages installation paths.'
+    banner '可选操作：强制重装版本正确的工具／迁移旧目录'
+    ui_status '[INFO] 逐项输入 Y 可替换该工具的所有已发现副本，包括版本正确的副本；直接按 Enter 跳过。'
+    ui_status '[INFO] CubeMX 已安装时跳过；其安装目录由安装向导管理。'
     for i in 0 1 2 3 5; do
         [ -n "${FOUND[$i]}" ] || continue
         folder=${NAMES[$i]}; [ "$folder" != arm-none-eabi-gcc ] || folder=arm-none-eabi
         destination="$ROOT/$folder"
-        case "${NAMES[$i]}" in git|ninja|openocd) destination='the system/Homebrew package location' ;; esac
-        ui_status "[INFO] Current: ${FOUND[$i]}"
-        ask "Force reinstall ${NAMES[$i]} into $destination? [y/N]:"
+        case "${NAMES[$i]}" in git|ninja|openocd) destination='系统／Homebrew 包安装位置' ;; esac
+        ui_status "[INFO] 当前路径：${FOUND[$i]}"
+        ask "是否将 ${NAMES[$i]} 强制重装到 ${destination}？[y=是 / N=否，默认 N]："
         case "$REPLY" in y|Y) ;; *) continue ;; esac
         FORCE_TOOLS[$i]=1
         for p in ${SEEN[@]+"${SEEN[@]}"}; do
@@ -321,7 +321,7 @@ remove_old_tool() {
         old=${OLD_PATHS[$index]}
         [ -e "$old" ] || [ -L "$old" ] || continue
         if [ -L "$old" ] && [ ! -e "$old" ]; then
-            confirm_write_scope "delete this obsolete dangling tool link: $old" || return 1
+            confirm_write_scope "删除此失效的旧工具链接：$old" || return 1
             if [ -w "${old%/*}" ]; then rm -- "$old" || return 1; else as_root rm -- "$old" || return 1; fi
             continue
         fi
@@ -335,20 +335,20 @@ remove_old_tool() {
                 if [ -z "$package" ] && [ "$real" != "$old" ]; then package=$(dpkg-query -S "$old" 2>/dev/null | head -n 1); package=${package%%: /*}; fi
                 if [ -n "$package" ]; then
                     printf 'Remove old system package: %s (%s)\n' "$package" "$real"
-                    confirm_write_scope "uninstall package $package ($real); system package files and database" || return 1
+                    confirm_write_scope "卸载软件包 ${package}（${real}）；涉及系统软件包文件和数据库" || return 1
                     as_root apt-get remove "$package" || return 1; owned=1
                 fi
             elif command -v rpm >/dev/null 2>&1; then
                 package=$(rpm -qf --qf '%{NAME}' "$real" 2>/dev/null) || package=''
                 if [ -n "$package" ]; then
-                    confirm_write_scope "uninstall package $package ($real); system package files and database" || return 1
+                    confirm_write_scope "卸载软件包 ${package}（${real}）；涉及系统软件包文件和数据库" || return 1
                     if command -v dnf >/dev/null 2>&1; then as_root dnf remove "$package" || return 1
                     else as_root zypper remove "$package" || return 1; fi
                     owned=1
                 fi
             elif command -v pacman >/dev/null 2>&1; then
                 package=$(pacman -Qqo "$real" 2>/dev/null) || package=''
-                if [ -n "$package" ]; then confirm_write_scope "uninstall package $package ($real); system package files and database" || return 1; as_root pacman -R "$package" || return 1; owned=1; fi
+                if [ -n "$package" ]; then confirm_write_scope "卸载软件包 ${package}（${real}）；涉及系统软件包文件和数据库" || return 1; as_root pacman -R "$package" || return 1; owned=1; fi
             elif command -v apk >/dev/null 2>&1; then
                 # Do not guess apk package names from versioned ownership text.
                 if apk info --who-owns "$real" >/dev/null 2>&1; then
@@ -360,7 +360,7 @@ remove_old_tool() {
                 /opt/homebrew/Cellar/*|/usr/local/Cellar/*)
                     package=${real#*/Cellar/}; package=${package%%/*}
                     case "$selected" in */Cellar/"$package"/*) echo 'Replacement is in the same Homebrew formula; refusing uninstall.' >&2; return 1 ;; esac
-                    confirm_write_scope "uninstall Homebrew formula $package and update Homebrew records" || return 1
+                    confirm_write_scope "卸载 Homebrew 软件包 $package 并更新 Homebrew 记录" || return 1
                     brew uninstall --formula "$package" || return 1; owned=1 ;;
             esac
         fi
@@ -373,7 +373,7 @@ remove_old_tool() {
             done
             if [ -z "$root" ]; then
                 printf 'Unregistered old tool: %s\n' "$real"
-                ask "Enter the exact directory belonging ONLY to $name to permanently remove it (empty = replacement incomplete):"
+                ask "请输入仅属于 $name 的独立目录完整路径，以永久删除该目录（留空则替换未完成）："
                 root=$REPLY
                 [ -n "$root" ] || { echo 'Old installation not removed.' >&2; return 1; }
             fi
@@ -386,12 +386,12 @@ remove_old_tool() {
             other=$(find "$root" -type f \( -name cmake -o -name git -o -name arm-none-eabi-gcc -o -name openocd -o -name STM32CubeMX -o -name ninja \) ! -name "$name" -print -quit) || return 1
             [ -z "$other" ] || { echo "Shared directory contains another tool: $other" >&2; return 1; }
             printf 'Removing verified old installation directory: %s\n' "$root"
-            confirm_write_scope "permanently delete the old installation directory $root" || return 1
+            confirm_write_scope "永久删除旧安装目录 $root" || return 1
             if [ -w "${root%/*}" ] && [ -w "$root" ]; then rm -rf -- "$root" || return 1
             else as_root rm -rf -- "$root" || return 1; fi
             if [ -L "$old" ]; then
                 # Remove only the dangling link that referred to this removed tool.
-                confirm_write_scope "delete the old tool link outside the removed installation: $old" || return 1
+                confirm_write_scope "删除位于旧安装目录之外的工具链接：$old" || return 1
                 if [ -w "${old%/*}" ]; then rm -- "$old" || return 1; else as_root rm -- "$old" || return 1; fi
             fi
         fi
@@ -463,7 +463,7 @@ install_archive() (
         }
         other=$(find "$dest" -type f \( -name cmake -o -name git -o -name arm-none-eabi-gcc -o -name ninja -o -name openocd -o -name STM32CubeMX \) ! -name "$name" -print -quit) || exit 1
         [ -z "$other" ] || { echo 'Fixed destination contains another tool; refusing deletion.' >&2; exit 1; }
-        confirm_write_scope "replace owned directory $dest with the validated new version" >&2 || exit 1
+        confirm_write_scope "使用已验证的新版本替换本脚本管理的目录 $dest" >&2 || exit 1
         rm -rf -- "$dest" || exit 1
     fi
     mv "$payload" "$dest" || exit 1
@@ -478,7 +478,7 @@ as_root() {
 }
 install_package() {
     local name=$1 package=$1
-    confirm_write_scope "install/reinstall $name via the package manager; system/Homebrew directories, package database and caches" || return 1
+    confirm_write_scope "通过包管理器安装／重装 ${name}；涉及系统／Homebrew 目录、软件包数据库和缓存" || return 1
     if [ "$PLATFORM" = Darwin ]; then
         if ! command -v brew >/dev/null 2>&1; then
             echo 'Homebrew is required for Git/Ninja/OpenOCD: https://brew.sh . Install it, then rerun.' >&2
@@ -507,11 +507,11 @@ install_package() {
 }
 install_cube() {
     local p url archive work setup='' unpack format member choice
-    banner 'CubeMX installation options'
-    ui_status '[1] Download/extract and launch the setup wizard'
-    ui_status '[2] Download/extract only (READY; not installed)'
-    ui_status '[3] SKIP CubeMX (default)'
-    ask 'Choose an option [1/2/3; default 3]:'
+    banner 'CubeMX 安装选项'
+    ui_status '[1] 下载、解压并启动安装向导'
+    ui_status '[2] 仅下载、解压（已准备好，尚未安装）'
+    ui_status '[3] 跳过 CubeMX（默认）'
+    ask '请选择 [1/2/3，默认 3]:'
     choice=$REPLY
     case "$choice" in 1|2) ;; *) STATUS[4]='SKIPPED (user choice)'; return 0 ;; esac
     if [ -z "$CUBE_INSTALLER" ]; then
@@ -523,7 +523,7 @@ install_cube() {
                 url='https://hkustgz-my.sharepoint.com/:u:/g/personal/pnx_hkust-gz_edu_cn/IQBi0ZlmZkFcSbUxlVfa4GUTAdpQuEDETtKtoDKH_uyoZgg?e=Nb34fh&download=1'; format=tar ;;
             *)
                 echo 'No supplied CubeMX package for this CPU/platform.'
-                ask 'Path to a compatible extracted CubeMX installer (empty to skip):'
+                ask '请输入与本机兼容且已解压的 CubeMX 安装器路径（留空跳过）：'
                 CUBE_INSTALLER=$REPLY; url='' ;;
         esac
         if [ -n "$url" ]; then
@@ -532,7 +532,7 @@ install_cube() {
             mkdir "$unpack" || return 1
             if ! download "$url" "$archive" || { [ "$format" = zip ] && ! unzip -tq "$archive" >/dev/null 2>&1; } || { [ "$format" = tar ] && ! tar -tf "$archive" >/dev/null 2>&1; }; then
                 echo 'Shared download unavailable, login required, or response is not the expected archive.'
-                ask "Path to a locally downloaded CubeMX $format archive (empty to skip):"
+                ask "请输入本地已下载的 CubeMX $format 安装包路径（留空跳过）："
                 archive=$REPLY
                 if [ -z "$archive" ]; then STATUS[4]='SKIPPED (shared download unavailable)'; return 0; fi
             fi
@@ -555,10 +555,10 @@ install_cube() {
         fi
     fi
     if [ -z "$CUBE_INSTALLER" ]; then STATUS[4]='SKIPPED (optional ST login/manual download)'; return 0; fi
-    if [ "$choice" = 2 ]; then STATUS[4]="READY (not installed): $CUBE_INSTALLER"; printf 'Run this installer later: %s\n' "$CUBE_INSTALLER"; return 0; fi
+    if [ "$choice" = 2 ]; then STATUS[4]="READY (not installed): $CUBE_INSTALLER"; printf '稍后可运行此安装器： %s\n' "$CUBE_INSTALLER"; return 0; fi
     [ -e "$CUBE_INSTALLER" ] || { echo 'Installer does not exist.' >&2; return 1; }
-    printf 'Launching CubeMX setup; choose this directory in the wizard: %s/stm32cubemx\n' "$ROOT"
-    confirm_write_scope 'run the CubeMX installer wizard; its chosen destination and OS registration changes' || return 1
+    printf '即将启动 CubeMX 安装器，请在向导中选择此安装目录： %s/stm32cubemx\n' "$ROOT"
+    confirm_write_scope '运行 CubeMX 安装向导；涉及所选目标目录写入和系统安装注册信息修改' || return 1
     if [ "$PLATFORM" = Darwin ]; then
         open -W "$CUBE_INSTALLER" || return 1
     else
@@ -569,7 +569,7 @@ install_cube() {
     while IFS= read -r -d '' member; do p=$member; break; done < <(
         find "$ROOT" "$HOME/STMicroelectronics" "$HOME/STM32CubeMX" "$HOME/ST" /Applications /opt/ST /usr/local/ST \
             -name '.staging.*' -prune -o -type f -name STM32CubeMX -print0 2>/dev/null)
-    if [ -z "$p" ]; then ask 'Full path to installed STM32CubeMX executable (empty to leave unverified):'; p=$REPLY; fi
+    if [ -z "$p" ]; then ask '请输入已安装的 STM32CubeMX 可执行文件完整路径（留空则不验证）：'; p=$REPLY; fi
     if [ -z "$p" ]; then STATUS[4]='UNVERIFIED (installer finished; PATH not configured)'; return 0; fi
     [ -x "$p" ] && [ "${p##*/}" = STM32CubeMX ] || { echo 'Expected executable STM32CubeMX.' >&2; return 1; }
     add_path "$p"
@@ -603,7 +603,7 @@ save_path() {
     local login="$HOME/.profile"
     if [ -f "$HOME/.bash_profile" ]; then login="$HOME/.bash_profile"
     elif [ -f "$HOME/.bash_login" ]; then login="$HOME/.bash_login"; fi
-    confirm_write_scope "write PATH loader entries to $login, $HOME/.bashrc, ${ZDOTDIR:-$HOME}/.zshrc and ${ZDOTDIR:-$HOME}/.zprofile" || return 1
+    confirm_write_scope "向 ${login}、$HOME/.bashrc、${ZDOTDIR:-$HOME}/.zshrc 和 ${ZDOTDIR:-$HOME}/.zprofile 写入 PATH 加载条目" || return 1
     for profile in "$login" "$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc" "${ZDOTDIR:-$HOME}/.zprofile"; do
         [ -d "${profile%/*}" ] || mkdir -p "${profile%/*}" || return 1
         if ! grep -Fqx "$line" "$profile" 2>/dev/null; then printf '\n%s\n' "$line" >> "$profile" || return 1; fi
@@ -615,12 +615,12 @@ scan
 plan
 [ "$SCAN_ONLY" -eq 0 ] || exit 0
 [ -t 0 ] || { echo 'Interactive terminal required for installation.' >&2; exit 2; }
-ask 'I = install/reinstall required tools + repair PATH, R = change destination, Q = quit:'
+ask 'I = 安装／重装所需工具并修复 PATH，R = 修改目标目录，Q = 退出：'
 if [ "$REPLY" = R ] || [ "$REPLY" = r ]; then
-    ask 'Absolute installation directory:'; ROOT=$REPLY
+    ask '请输入安装目录的绝对路径:'; ROOT=$REPLY
     case "$ROOT" in /*) ;; *) echo 'Absolute directory required.'; exit 2 ;; esac
     scan; plan
-    ask 'Enter I to continue, anything else to quit:'
+    ask '输入 I 继续，输入其他内容退出:'
 fi
 case "$REPLY" in I|i) ;; *) exit 0 ;; esac
 while :; do
@@ -628,10 +628,10 @@ while :; do
     case "$ROOT" in */../*|*/..|*/./*|*/.) echo 'Use a normalized absolute installation path without dot components.' >&2; exit 2 ;; esac
     if [ -d "$ROOT" ]; then ROOT=$(cd -P "$ROOT" && pwd) || exit 1; fi
     case "$ROOT" in /|/usr|/usr/local|/opt|/Applications|/Users|/home|"$HOME") echo 'Choose a dedicated toolchain subdirectory.' >&2; exit 2 ;; esac
-    ask "Authorize creating/writing ONLY the selected installation directory $ROOT? [y/N]:"
+    ask "是否授权仅创建／写入所选安装目录 ${ROOT}？[y=是 / N=否，默认 N]："
     case "$REPLY" in y|Y) WRITE_AUTHORIZED=1 ;; *) exit 0 ;; esac
     if mkdir -p "$ROOT" && probe=$(mktemp "$ROOT/.write-test.XXXXXXXX"); then rm -- "$probe"; break; fi
-    ask "Use sudo to grant this user write access ONLY on $ROOT (no parent or recursive permission edits)? [y/N]:"
+    ask "是否通过 sudo 仅授予当前用户对 $ROOT 的写入权限（不修改父目录、不递归修改权限）？[y=是 / N=否，默认 N]："
     if [ "$REPLY" = y ] || [ "$REPLY" = Y ]; then
         parent=${ROOT%/*}; [ -n "$parent" ] || parent=/
         # Resolve the parent before granting rights; do not grant through links.
@@ -649,17 +649,17 @@ while :; do
         else echo 'Grant requires an existing, non-linked parent and a non-linked target.'; fi
     fi
     WRITE_AUTHORIZED=0
-    ask 'Enter another absolute directory (empty to cancel):'
+    ask '请输入另一个目录的绝对路径（留空取消）：'
     ROOT=$REPLY
     case "$ROOT" in /*) scan ;; *) exit 1 ;; esac
 done
 SCAN_WORK=$(mktemp -d "$ROOT/.staging.runtime.XXXXXXXX") || exit 1
-confirm_write_scope 'execute discovered tools with --version for installation decisions; external programs are not OS-sandboxed' || exit 1
+confirm_write_scope '运行已发现的工具并传入 --version 以确定安装方案；外部程序不受操作系统沙箱限制' || exit 1
 check_discovered_versions
 select_force_reinstall
 plan
 if [ "${FORCE_TOOLS[0]+set}${FORCE_TOOLS[1]+set}${FORCE_TOOLS[2]+set}${FORCE_TOOLS[3]+set}${FORCE_TOOLS[5]+set}" != '' ]; then
-    ask 'Proceed with this replacement plan and old-copy cleanup? [y/N]:'
+    ask '是否执行上述替换计划并清理旧副本？[y=是 / N=否，默认 N]:'
     case "$REPLY" in y|Y) ;; *) exit 0 ;; esac
 fi
 for dependency in curl tar; do
