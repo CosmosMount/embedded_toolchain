@@ -10,13 +10,36 @@ param(
     [string]$CubeMXInstaller
 )
 $ErrorActionPreference = 'Stop'
+function Write-Ui([string]$Message, [string]$Kind = 'INFO', [switch]$Raw) {
+    $color = switch ($Kind) {
+        'OK' { 'Green' }; 'WARN' { 'Yellow' }; 'ERROR' { 'Red' }
+        'ASK' { 'Magenta' }; 'STEP' { 'Cyan' }; default { 'DarkCyan' }
+    }
+    $text = $Message
+    if (-not $Raw) { $text = "[$Kind] $Message" }
+    if (-not [Console]::IsOutputRedirected -and $env:TERM -ne 'dumb' -and -not (Test-Path Env:NO_COLOR)) {
+        Write-Host $text -ForegroundColor $color
+    } else { Write-Host $text }
+}
+function Read-Ui([string]$Prompt) {
+    Write-Ui $Prompt 'ASK'
+    Read-Host '  >'
+}
+function Write-UiStatus([string]$Message) {
+    $kind = 'INFO'
+    if ($Message -match 'FAIL|ERROR|INCOMPLETE') { $kind = 'ERROR' }
+    elseif ($Message -match 'DENIED|MISMATCH|PENDING|READY|SKIP|REMOVE|NOT SCANNED') { $kind = 'WARN' }
+    elseif ($Message -match 'DONE|MATCH|CANDIDATE|INSTALLED|FOUND|SUCCESS') { $kind = 'OK' }
+    Write-Ui $Message $kind -Raw
+}
 function Wait-BeforeExit {
     if (-not $NoPause -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
-        [void](Read-Host 'Finished. Press Enter to exit (output will remain in terminal history)')
+        [void](Read-Ui 'Finished. Press Enter to exit (output will remain in terminal history)')
     }
 }
 trap {
-    Write-Host "ERROR: $_"
+    if ($script:scanLineWidth -gt 0) { Write-Host ''; $script:scanLineWidth = 0 }
+    Write-Ui "$_" 'ERROR'
     Wait-BeforeExit
     exit 1
 }
@@ -30,6 +53,7 @@ if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64' -and $env:PROCESSOR_ARCHITEW6432 -ne
 $names = @('cmake', 'git', 'arm-none-eabi-gcc', 'openocd', 'STM32CubeMX', 'ninja')
 $found = @{}
 $obsolete = @{}
+$forceTools = @{}
 $removedDirs = New-Object 'System.Collections.Generic.List[string]'
 $cubeShareUrl = 'https://hkustgz-my.sharepoint.com/:u:/g/personal/pnx_hkust-gz_edu_cn/IQAhhy-uMdyhTK8LwSanKsiNAShn5shcsRkNmBqSKGvIrZw?e=cpKvAb&download=1'
 $scanReport = New-Object 'System.Collections.Generic.List[string]'
@@ -40,18 +64,48 @@ $versionsChecked = $false
 $writeAuthorized = $false
 function Confirm-WriteScope([string]$Scope) {
     if (-not $writeAuthorized) { throw 'Write access has not been authorized for the installation phase.' }
-    if ((Read-Host "Allow this additional write scope: $Scope [y/N]") -ne 'y') { throw "Write scope declined: $Scope" }
+    if ((Read-Ui "Allow this additional write scope: $Scope [y/N]") -ne 'y') { throw "Write scope declined: $Scope" }
 }
 function Banner([string]$Text) {
-    Write-Host "`n+------------------------------------------------------------+" -ForegroundColor Cyan
-    Write-Host "  $Text" -ForegroundColor Cyan
-    Write-Host '+------------------------------------------------------------+' -ForegroundColor Cyan
+    Write-Ui "`n+------------------------------------------------------------+" 'STEP' -Raw
+    Write-Ui "  >> $Text" 'STEP' -Raw
+    Write-Ui '+------------------------------------------------------------+' 'STEP' -Raw
+}
+$script:scanLineWidth = 0
+$script:scanTick = 0
+function Write-ScanDisplay([string]$Message) {
+    # Plain foreground text only. Never use the native colored progress panel.
+    $interactive = -not [Console]::IsOutputRedirected -and $env:TERM -ne 'dumb'
+    $width = [Console]::WindowWidth - 1
+    if (-not $interactive -or $width -lt 30) { Write-Host $Message; return }
+    if ($script:scanLineWidth -gt 0) {
+        Write-Host ("`r" + (' ' * [Math]::Min($script:scanLineWidth, $width)) + "`r") -NoNewline
+        $script:scanLineWidth = 0
+    }
+    if ($Message -match '^\[SCAN (\d|READ ONLY)') {
+        $position = $script:scanTick % 26
+        if ($position -gt 13) { $position = 26 - $position }
+        $script:scanTick++
+        $bar = '[' + (' ' * $position) + '===' + (' ' * (13 - $position)) + '] '
+        $line = $bar + ($Message -replace '[\x00-\x1f\x7f]', ' ')
+        # Reserve two cells per non-ASCII character, preventing wide paths wrapping.
+        $cells = 0; $end = 0
+        while ($end -lt $line.Length) {
+            $next = 1; if ([int]$line[$end] -gt 127) { $next = 2 }
+            if ($cells + $next -gt $width - 3) { break }
+            $cells += $next; $end++
+        }
+        if ($end -lt $line.Length) { $line = $line.Substring(0, $end) + '...'; $cells += 3 }
+        if (Test-Path Env:NO_COLOR) { Write-Host ("`r" + $line) -NoNewline }
+        else { Write-Host ("`r" + $line) -NoNewline -ForegroundColor Cyan }
+        $script:scanLineWidth = $cells
+    } else { Write-UiStatus $Message }
 }
 function Scan-Roots {
     param([string[]]$Roots, [IO.TextWriter]$ProgressWriter = $null)
     function Write-ScanStatus([string]$Message) {
         if ($ProgressWriter) { $ProgressWriter.WriteLine('P' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Message))); $ProgressWriter.Flush() }
-        else { Write-Host $Message }
+        else { Write-ScanDisplay $Message }
     }
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $lastUpdate = -1000L
@@ -67,7 +121,7 @@ function Scan-Roots {
         $dir = $queue.Dequeue()
         if (-not $visited.Add($dir.TrimEnd('\'))) { continue }
         if ($timer.ElapsedMilliseconds - $lastUpdate -ge 1000) {
-            Write-ScanStatus ("[SCAN {0:0}s] directories={1} candidates={2} denied={3} errors={4} queued={5} | {6}" -f $timer.Elapsed.TotalSeconds, $visited.Count, $items.Count, $denied.Count, $otherErrors.Count, $queue.Count, $dir)
+            Write-ScanStatus ("[SCAN {0:0}s] dirs={1} tools={2} denied={3} err={4} queue={5} | {6}" -f $timer.Elapsed.TotalSeconds, $visited.Count, $items.Count, $denied.Count, $otherErrors.Count, $queue.Count, $dir)
             $lastUpdate = $timer.ElapsedMilliseconds
         }
         try { $entries = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop) }
@@ -139,11 +193,11 @@ function Find-Tools {
     Banner 'Scanning all mounted filesystem drives; this can take several minutes'
     $scan = Scan-Roots $roots
     if (@($scan.Denied).Count -gt 0) {
-        Write-Host 'Permission denied:' -ForegroundColor Yellow
+        Write-Ui 'Permission denied:' 'WARN' -Raw
         $scan.Denied | ForEach-Object { Write-Host "  $_" }
         $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         if (-not $isAdmin -and -not [Console]::IsInputRedirected) {
-            $consent = Read-Host 'Retry these directories using UAC? Only directory discovery is elevated [y/N]'
+            $consent = Read-Ui 'Retry these directories using UAC? Only directory discovery is elevated [y/N]'
             if ($consent -eq 'y') {
                 # Memory-only IPC: no temporary input, output or progress files.
                 $pipe = $null; $reader = $null; $writer = $null
@@ -174,11 +228,11 @@ function Find-Tools {
                     $extra = $null
                     while ($true) {
                         $pendingLine = $reader.ReadLineAsync()
-                        while (-not $pendingLine.Wait(5000)) { Write-Host '[SCAN READ ONLY] Still reading the current directory...' }
+                        while (-not $pendingLine.Wait(5000)) { Write-ScanDisplay '[SCAN READ ONLY] Still reading the current directory...' }
                         $line = $pendingLine.Result
                         if ($null -eq $line) { break }
                         $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line.Substring(1)))
-                        if ($line.StartsWith('P')) { Write-Host $payload } else { $extra = $payload | ConvertFrom-Json; break }
+                        if ($line.StartsWith('P')) { Write-ScanDisplay $payload } else { $extra = $payload | ConvertFrom-Json; break }
                     }
                     $child.WaitForExit()
                     if ($child.ExitCode -ne 0) { throw "Elevated scanner exit code $($child.ExitCode)" }
@@ -187,7 +241,7 @@ function Find-Tools {
                     $scan.Denied = @($extra.Denied)
                     $scan.Errors = @($scan.Errors) + @($extra.Errors)
                     $scan.Links = @($scan.Links) + @($extra.Links)
-                } catch { Write-Host "Permission retry cancelled/failed: $_" -ForegroundColor Yellow }
+                } catch { Write-ScanDisplay "Permission retry cancelled/failed: $_" }
                 finally {
                     if ($pipe) { $pipe.Dispose() }
                 }
@@ -195,8 +249,8 @@ function Find-Tools {
         }
     }
     foreach ($p in @($scan.Items)) { $candidates.Add($p) }
-    foreach ($path in @($scan.Denied)) { Write-Host "[NOT SCANNED: permission] $path" -ForegroundColor Yellow }
-    foreach ($errorText in @($scan.Errors)) { Write-Host "[SCAN ERROR] $errorText" -ForegroundColor Yellow }
+    foreach ($path in @($scan.Denied)) { Write-Ui "[NOT SCANNED: permission] $path" 'WARN' -Raw }
+    foreach ($errorText in @($scan.Errors)) { Write-Ui "[SCAN ERROR] $errorText" 'WARN' -Raw }
     foreach ($path in @($scan.Links)) { Write-Host "[DIRECTORY LINK: not followed; use -SearchRoot to scan explicitly] $path" }
     $script:discovered = @($candidates.ToArray() | Select-Object -Unique)
     $script:versionsChecked = $false
@@ -230,7 +284,7 @@ function Check-DiscoveredVersions {
         $label = if ($ok) { 'MATCH' } else { 'MISMATCH / UNKNOWN / UNUSABLE' }
         $firstLine = ($version -split "`r?`n" | Select-Object -First 1)
         $scanReport.Add("[$label] $name | $firstLine | $path")
-        Write-Host $scanReport[$scanReport.Count - 1]
+        Write-UiStatus $scanReport[$scanReport.Count - 1]
         # Keep looking after an incompatible copy; any matching copy is reusable.
         if ($ok -and -not $found.ContainsKey($name)) { $found[$name] = $path }
         if (-not $ok -and $name -ne 'STM32CubeMX') { $obsolete[$name] = @($obsolete[$name]) + @($path) }
@@ -240,15 +294,33 @@ function Check-DiscoveredVersions {
 function Show-Plan {
     Banner 'Embedded toolchain | installation plan'
     foreach ($name in $names) {
+        if ($forceTools.ContainsKey($name)) {
+            Write-Ui "[FORCE REINSTALL] $name (replace even if version matches)" 'WARN' -Raw
+            continue
+        }
         if ($found.ContainsKey($name)) {
             $label = if ($versionsChecked -or $name -eq 'STM32CubeMX') { 'FOUND / SKIP' } else { 'FOUND / VERSION CHECK PENDING' }
-            Write-Host "[$label] $name : $($found[$name])" -ForegroundColor Green
+            Write-Ui "[$label] $name : $($found[$name])" 'OK' -Raw
         }
-        else { Write-Host "[INSTALL / REINSTALL] $name (missing, wrong version, or unverifiable)" -ForegroundColor Yellow }
+        else { Write-Ui "[INSTALL / REINSTALL] $name (missing, wrong version, or unverifiable)" 'WARN' -Raw }
     }
     Write-Host 'Targets: CMake 3.22.6 | Arm 13.3.rel1 | CubeMX 6.18.0 (optional)'
     Write-Host "New portable tools: $InstallDir"
-    foreach ($name in $obsolete.Keys) { foreach ($path in @($obsolete[$name])) { if ($path) { Write-Host "[REMOVE AFTER REPLACEMENT] $path" -ForegroundColor Yellow } } }
+    foreach ($name in $obsolete.Keys) { foreach ($path in @($obsolete[$name])) { if ($path) { Write-Ui "[REMOVE AFTER REPLACEMENT] $path" 'WARN' -Raw } } }
+}
+function Select-ForceReinstall {
+    Banner 'Optional: reinstall matching tools / migrate old directory names'
+    Write-Ui 'Enter Y per tool to replace every discovered copy, including matching versions. Enter skips.'
+    Write-Ui 'CubeMX retains its existing-installation skip policy. Its setup wizard manages installation paths.'
+    foreach ($name in $names) {
+        if ($name -eq 'STM32CubeMX' -or -not $found.ContainsKey($name)) { continue }
+        $folder = if ($name -eq 'arm-none-eabi-gcc') { 'arm-none-eabi' } else { $name }
+        Write-Ui "Current: $($found[$name])" 'INFO'
+        if ((Read-Ui "Force reinstall $name into $(Join-Path $InstallDir $folder)? [y/N]") -ne 'y') { continue }
+        $forceTools[$name] = $true
+        $obsolete[$name] = @(@($obsolete[$name]) + @($discovered | Where-Object { [IO.Path]::GetFileNameWithoutExtension($_) -eq $name }) | Where-Object { $_ } | Select-Object -Unique)
+        $found.Remove($name)
+    }
 }
 function Remove-OldTool([string]$Name, [string]$NewExecutable) {
     if (-not $NewExecutable -or -not (Test-Path -LiteralPath $NewExecutable -PathType Leaf)) { throw 'No validated replacement; refusing old installation removal.' }
@@ -295,7 +367,7 @@ function Remove-OldTool([string]$Name, [string]$NewExecutable) {
             }
             if (-not $root) {
                 Write-Host "Unregistered old tool: $old"
-                $root = Read-Host "Enter the exact directory belonging ONLY to $Name to permanently remove it (empty = replacement incomplete)"
+                $root = Read-Ui "Enter the exact directory belonging ONLY to $Name to permanently remove it (empty = replacement incomplete)"
                 if (-not $root) { throw "Old installation not removed: $old" }
             }
             $root = (Get-Item -LiteralPath $root).FullName.TrimEnd('\')
@@ -340,7 +412,7 @@ function Save-Path {
     if ($machineNew -ne $machine) {
         Write-Host 'Obsolete tool directories also occur in the machine PATH.'
         $removedDirs | ForEach-Object { Write-Host "  Remove PATH entry: $_" }
-        if ((Read-Host 'Use UAC to remove these obsolete PATH entries for all users? [y/N]') -ne 'y') { throw 'Machine PATH cleanup declined; replacement is incomplete.' }
+        if ((Read-Ui 'Use UAC to remove these obsolete PATH entries for all users? [y/N]') -ne 'y') { throw 'Machine PATH cleanup declined; replacement is incomplete.' }
         $dirs64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @($removedDirs.ToArray()) -Compress)))
         $helper = "`$ErrorActionPreference='Stop'; `$dirs = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$dirs64')) | ConvertFrom-Json; `$old=[Environment]::GetEnvironmentVariable('Path','Machine'); `$new=(`$old -split ';' | Where-Object { `$dirs -notcontains [Environment]::ExpandEnvironmentVariables(`$_) }) -join ';'; [Environment]::SetEnvironmentVariable('Path',`$new,'Machine')"
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($helper))
@@ -362,7 +434,7 @@ function Save-Path {
             $candidate = Join-Path ([Environment]::ExpandEnvironmentVariables($dir)) "$name.exe"
             if (Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction SilentlyContinue) {
                 if ($candidate -ine $found[$name]) {
-                    Write-Host "[PATH PRIORITY] Machine PATH may select $candidate in a new terminal." -ForegroundColor Yellow
+                    Write-Ui "[PATH PRIORITY] Machine PATH may select $candidate in a new terminal." 'WARN' -Raw
                     Write-Host "Activate the selected tools with: & '$($activation.Replace("'", "''"))'"
                 }
                 break
@@ -414,35 +486,49 @@ function Install-Zip([string]$Name, [string]$Url, [string]$VersionPattern, [stri
     } finally { $ErrorActionPreference = $previousPreference }
     if ($nativeExit -ne 0) { throw "$Name failed its version check: $output" }
     if ($VersionPattern -and "$output" -notmatch $VersionPattern) { throw "Unexpected version: $output" }
-    $relative = $exe.FullName.Substring($unpack.Length)
-    $dest = Join-Path $InstallDir ($Name + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    # Strip a single vendor archive wrapper, keeping bin/share/lib together.
+    $children = @(Get-ChildItem -LiteralPath $unpack -Force)
+    $payload = $unpack
+    if ($children.Count -eq 1 -and $children[0].PSIsContainer) { $payload = $children[0].FullName }
+    $relative = $exe.FullName.Substring($payload.Length)
+    $folder = if ($Name -eq 'arm-none-eabi-gcc') { 'arm-none-eabi' } else { $Name.ToLowerInvariant() }
+    $dest = Join-Path $InstallDir $folder
     $boundary = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\') + '\'
-    foreach ($target in @($unpack, $dest)) {
+    foreach ($target in @($payload, $dest)) {
         if (-not [IO.Path]::GetFullPath($target).StartsWith($boundary, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Move target is outside the selected installation directory: $target"
         }
     }
-    if (Test-Path -LiteralPath $dest) { throw "Destination already exists: $dest" }
-    Move-Item -LiteralPath $unpack -Destination $dest
+    if (Test-Path -LiteralPath $dest) {
+        $originalOld = @($obsolete[$Name] | Where-Object { $_ })
+        $collision = @($originalOld | Where-Object { $_.StartsWith($dest + '\', [StringComparison]::OrdinalIgnoreCase) })
+        if ($collision.Count -eq 0) { throw "Fixed destination is occupied by an unverified directory; move it explicitly before retrying: $dest" }
+        $obsolete[$Name] = $collision
+        try { Remove-OldTool $Name $exe.FullName }
+        finally { $obsolete[$Name] = $originalOld }
+        if (Test-Path -LiteralPath $dest) { throw "Old destination remains; refusing to merge installations: $dest" }
+        $obsolete[$Name] = @($originalOld | Where-Object { $collision -notcontains $_ })
+    }
+    Move-Item -LiteralPath $payload -Destination $dest
     @{ tool = $Name; root = $dest } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dest '.embedded-toolchain-owner.json') -Encoding UTF8
     $script:found[$Name] = $dest + $relative
     Add-ToolPath $found[$Name]
     # Keep staging downloads for troubleshooting; never remove user directories.
-    Write-Host "$output" -ForegroundColor Green
+    Write-Ui "$output" 'OK' -Raw
 }
 if (-not $InstallDir) { $InstallDir = 'D:\embedded_toolchain' }
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 Find-Tools
 Show-Plan
 if ($ScanOnly) { Wait-BeforeExit; exit 0 }
-$answer = Read-Host 'Enter I to install/reinstall required tools and repair PATH, R to change destination, or Q to quit'
+$answer = Read-Ui 'Enter I to install/reinstall required tools and repair PATH, R to change destination, or Q to quit'
 if ($answer -eq 'R') {
-    $InstallDir = Read-Host 'Absolute installation directory'
+    $InstallDir = Read-Ui 'Absolute installation directory'
     if (-not [IO.Path]::IsPathRooted($InstallDir)) { throw 'An absolute path is required.' }
     $InstallDir = [IO.Path]::GetFullPath($InstallDir)
     Find-Tools
     Show-Plan
-    $answer = Read-Host 'Enter I to continue, anything else to quit'
+    $answer = Read-Ui 'Enter I to continue, anything else to quit'
 }
 if ($answer -ne 'I') { Wait-BeforeExit; exit 0 }
 while ($true) {
@@ -453,7 +539,7 @@ while ($true) {
         if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Choose a physical installation path instead of a linked directory.' }
         $cursor = Split-Path -Parent $cursor
     }
-    if ((Read-Host "Authorize creating/writing ONLY the selected installation directory: $InstallDir ? [y/N]") -ne 'y') { Wait-BeforeExit; exit 0 }
+    if ((Read-Ui "Authorize creating/writing ONLY the selected installation directory: $InstallDir ? [y/N]") -ne 'y') { Wait-BeforeExit; exit 0 }
     $writeAuthorized = $true
     try {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -462,8 +548,8 @@ while ($true) {
         Remove-Item -LiteralPath $probe
         break
     } catch {
-        Write-Warning "Cannot write to $InstallDir : $_"
-        if ((Read-Host "Use UAC to grant this user Modify access ONLY on $InstallDir (no parent or recursive ACL edits)? [y/N]") -eq 'y') {
+        Write-Ui "Cannot write to $InstallDir : $_" 'WARN'
+        if ((Read-Ui "Use UAC to grant this user Modify access ONLY on $InstallDir (no parent or recursive ACL edits)? [y/N]") -eq 'y') {
             try {
                 $targetLiteral = "'" + $InstallDir.Replace("'", "''") + "'"
                 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -475,10 +561,10 @@ while ($true) {
                 $probe = Join-Path $InstallDir ('.write-test-' + [guid]::NewGuid().ToString('N'))
                 [IO.File]::WriteAllText($probe, ''); Remove-Item -LiteralPath $probe
                 break
-            } catch { Write-Warning "Selected-directory grant failed: $_" }
+            } catch { Write-Ui "Selected-directory grant failed: $_" 'ERROR' }
         }
         $writeAuthorized = $false
-        $InstallDir = Read-Host 'Specify another absolute directory (empty to cancel)'
+        $InstallDir = Read-Ui 'Specify another absolute directory (empty to cancel)'
         if (-not $InstallDir) { Wait-BeforeExit; exit 1 }
         if (-not [IO.Path]::IsPathRooted($InstallDir)) { throw 'An absolute path is required.' }
         $InstallDir = [IO.Path]::GetFullPath($InstallDir)
@@ -487,7 +573,9 @@ while ($true) {
 }
 Confirm-WriteScope 'execute discovered command-line tools with --version for installation decisions; external programs are not OS-sandboxed'
 Check-DiscoveredVersions
+Select-ForceReinstall
 Show-Plan
+if ($forceTools.Count -gt 0 -and (Read-Ui 'Proceed with this replacement plan and old-copy cleanup? [y/N]') -ne 'y') { Wait-BeforeExit; exit 0 }
 $failed = $false
 foreach ($name in $names) {
     Banner $name
@@ -526,6 +614,12 @@ foreach ($name in $names) {
                 Install-Zip $name $asset.browser_download_url '' $digest
             }
             'STM32CubeMX' {
+                Banner 'CubeMX installation options'
+                Write-Ui '[1] Download/extract and launch the setup wizard' 'INFO' -Raw
+                Write-Ui '[2] Download/extract only (READY; not installed)' 'WARN' -Raw
+                Write-Ui '[3] SKIP CubeMX (default)' 'WARN' -Raw
+                $cubeChoice = Read-Ui 'Choose an option [1/2/3; default 3]'
+                if ($cubeChoice -notin @('1', '2')) { $status[$name] = 'SKIPPED (user choice)'; continue }
                 if (-not $CubeMXInstaller) {
                     $cubeWork = Join-Path $InstallDir ('.staging-cubemx-' + [guid]::NewGuid().ToString('N'))
                     New-Item -ItemType Directory -Path $cubeWork | Out-Null
@@ -535,7 +629,7 @@ foreach ($name in $names) {
                         Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $cubeWork 'payload')
                     } catch {
                         Write-Host "Shared download/extraction failed (login, expired link or non-archive response): $_"
-                        $localZip = Read-Host 'Local downloaded CubeMX ZIP (empty to skip)'
+                        $localZip = Read-Ui 'Local downloaded CubeMX ZIP (empty to skip)'
                         if (-not $localZip) { $status[$name] = 'SKIPPED (shared download unavailable)'; continue }
                         $cubeWork = Join-Path $InstallDir ('.staging-cubemx-' + [guid]::NewGuid().ToString('N'))
                         New-Item -ItemType Directory -Path $cubeWork | Out-Null
@@ -546,16 +640,17 @@ foreach ($name in $names) {
                     $CubeMXInstaller = $setup[0].FullName
                 }
                 if (-not $CubeMXInstaller) { $status[$name] = 'SKIPPED (optional ST login/manual download)'; continue }
+                if ($cubeChoice -eq '2') { $status[$name] = "READY (not installed): $CubeMXInstaller"; Write-Host "Run this installer later: $CubeMXInstaller"; continue }
                 $installer = Get-Item -LiteralPath $CubeMXInstaller
                 if ($installer.Extension -ne '.exe') { throw 'Supply an extracted official .exe installer.' }
-                Write-Host "Launching extracted CubeMX installer. Complete its installation wizard; suggested destination: $InstallDir\STM32CubeMX"
+                Write-Host "Launching extracted CubeMX installer. Choose this installation directory in the wizard: $InstallDir\stm32cubemx"
                 Confirm-WriteScope "run the CubeMX installer wizard; authorize its chosen destination and OS registration changes separately from scanning"
                 $process = Start-Process -FilePath $installer.FullName -WorkingDirectory $installer.DirectoryName -Wait -PassThru
                 if ($process.ExitCode -ne 0) { throw "CubeMX installer exit code: $($process.ExitCode)" }
                 $cubeRoots = @($InstallDir, "$env:ProgramFiles\STMicroelectronics", "$env:ProgramFiles\STM32CubeMX", "$env:USERPROFILE\STMicroelectronics", "$env:USERPROFILE\STM32CubeMX", 'C:\ST') | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
                 $cubeScan = Scan-Roots $cubeRoots
                 $exePath = @($cubeScan.Items | Where-Object { [IO.Path]::GetFileName($_) -eq 'STM32CubeMX.exe' } | Select-Object -First 1)
-                if ($exePath.Count -gt 0) { $exePath = $exePath[0] } else { $exePath = Read-Host 'Full path to installed STM32CubeMX.exe (empty to skip PATH setup)' }
+                if ($exePath.Count -gt 0) { $exePath = $exePath[0] } else { $exePath = Read-Ui 'Full path to installed STM32CubeMX.exe (empty to skip PATH setup)' }
                 if (-not $exePath) { $status[$name] = 'UNVERIFIED (installer finished; PATH not configured)'; continue }
                 $exe = Get-Item -LiteralPath $exePath
                 if ($exe.Name -ne 'STM32CubeMX.exe') { throw 'Expected STM32CubeMX.exe.' }
@@ -568,11 +663,11 @@ foreach ($name in $names) {
     } catch {
         $failed = $true
         $status[$name] = "FAILED: $_"
-        Write-Warning "$name : $_"
+        Write-Ui "$name : $_" 'ERROR'
     }
 }
 try { Save-Path; Write-Host 'User PATH saved. Open a new terminal; restart its parent app if needed.' }
-catch { $failed = $true; Write-Warning "Cannot persist user PATH: $_" }
+catch { $failed = $true; Write-Ui "Cannot persist user PATH: $_" 'ERROR' }
 Banner 'Summary'
 foreach ($name in $names) { Write-Host ('{0,-20} {1}' -f $name, $status[$name]) }
 Write-Host 'Downloads/staging are retained in the installation directory for diagnosis.'

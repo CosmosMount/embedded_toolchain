@@ -20,9 +20,12 @@ SCAN_WORK=''
 SCAN_ERRORS=()
 WRITE_AUTHORIZED=0
 VERSIONS_CHECKED=0
+FORCE_TOOLS=()
 STATUS=()
 PATH_DIRS=()
 FAILED=0
+SCAN_LINE=0
+SCAN_TICK=0
 usage() {
     cat <<'EOF'
 Options:
@@ -55,6 +58,7 @@ done
 finish() {
     local code=$?
     trap - EXIT
+    [ "$SCAN_LINE" -eq 0 ] || printf '\n'
     if [ "${BASH_SUBSHELL:-0}" -eq 0 ] && [ -n "$SCAN_WORK" ]; then
         rm -f "$SCAN_WORK/paths" "$SCAN_WORK/errors" "$SCAN_WORK/version"
         rmdir "$SCAN_WORK" 2>/dev/null || true
@@ -68,17 +72,53 @@ finish() {
 trap finish EXIT
 [ "$(uname -s)" = "$PLATFORM" ] || { printf 'Wrong platform: expected %s\n' "$PLATFORM" >&2; exit 2; }
 case "$ROOT" in /*) ;; *) echo 'Installation directory must be absolute.' >&2; exit 2 ;; esac
-C=''; Y=''; G=''; RESET=''
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+C=''; Y=''; G=''; R=''; M=''; RESET=''
+if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ] && [ -z "${NO_COLOR+x}" ]; then
     # Change foreground only; preserve the terminal background and other styles.
     C=$'\033[36m'; Y=$'\033[33m'; G=$'\033[32m'; RESET=$'\033[39m'
+    R=$'\033[31m'; M=$'\033[35m'
 fi
-banner() { printf '\n%s+------------------------------------------------------------+\n  %s\n+------------------------------------------------------------+%s\n' "$C" "$1" "$RESET"; }
-ask() { printf '%s ' "$1"; IFS= read -r REPLY || REPLY=''; }
+banner() { printf '\n%s+------------------------------------------------------------+\n  >> %s\n+------------------------------------------------------------+%s\n' "$C" "$1" "$RESET"; }
+ui_status() {
+    local color=$C
+    case "$1" in
+        *FAIL*|*ERROR*|*INCOMPLETE*) color=$R ;;
+        *DENIED*|*MISMATCH*|*PENDING*|*READY*|*SKIP*|*REMOVE*) color=$Y ;;
+        *DONE*|*MATCH*|*CANDIDATE*|*INSTALLED*|*FOUND*|*SUCCESS*) color=$G ;;
+    esac
+    printf '%s%s%s\n' "$color" "$1" "$RESET"
+}
+ask() { printf '\n%s[ASK] %s%s\n  > ' "$M" "$1" "$RESET"; IFS= read -r REPLY || REPLY=''; }
 confirm_write_scope() {
     [ "$WRITE_AUTHORIZED" -eq 1 ] || { echo 'Installation write access has not been authorized.' >&2; return 1; }
     ask "Allow this additional write scope: $1 [y/N]:"
     case "$REPLY" in y|Y) return 0 ;; *) echo "Write scope declined: $1" >&2; return 1 ;; esac
+}
+scan_display() {
+    local message=$1 width=${COLUMNS:-80} position bar line LC_ALL=C
+    case "$width" in ''|*[!0-9]*) width=80 ;; esac
+    if [ ! -t 1 ] || [ "${TERM:-dumb}" = dumb ] || [ "$width" -lt 40 ]; then
+        printf '%s\n' "$message"; return
+    fi
+    if [ "$SCAN_LINE" -gt 0 ]; then
+        printf '\r%*s\r' "$SCAN_LINE" ''
+        SCAN_LINE=0
+    fi
+    case "$message" in
+        '[SCAN '[0-9]*s']'*)
+            position=$((SCAN_TICK % 26))
+            [ "$position" -le 13 ] || position=$((26 - position))
+            SCAN_TICK=$((SCAN_TICK + 1))
+            printf -v bar '[%*s===%*s] ' "$position" '' "$((13 - position))" ''
+            # Full paths remain in candidate records; keep the live row ASCII
+            # so control characters and wide glyphs cannot wrap the bar.
+            line=${message//[^[:print:]]/?}
+            line="$bar$line"
+            if [ "${#line}" -gt "$((width - 1))" ]; then line="${line:0:$((width - 4))}..."; fi
+            printf '\r%s%s%s' "$C" "$line" "$RESET"
+            SCAN_LINE=${#line} ;;
+        *) ui_status "$message" ;;
+    esac
 }
 collect_paths() {
     local elevated=$1 root p directory count=0 candidates=0 started=$SECONDS last=-1 denied=0 errors=0
@@ -88,9 +128,9 @@ collect_paths() {
     # Include mounted data/removable volumes. Never traverse virtual filesystems.
     for root in / ${EXTRA_ROOTS[@]+"${EXTRA_ROOTS[@]}"}; do
         case "$root" in /*) ;; *) root="$PWD/$root" ;; esac
-        printf 'Scanning: %s\n' "$root"
+        scan_display "Scanning: $root"
         directory=$root
-        printf '[SCAN] directories=%s candidates=%s | %s\n' "$count" "$candidates" "$directory"
+        scan_display "[SCAN 0s] dirs=$count tools=$candidates | $directory"
         # Emit directory records as well, so a tree containing no tools still
         # produces progress. Stream paths using NUL delimiters (spaces/newlines safe).
         while IFS= read -r -d '' p; do
@@ -98,9 +138,9 @@ collect_paths() {
                 '!ERROR!'*)
                     p=${p#'!ERROR!'}; SCAN_ERRORS+=("$p"); errors=$((errors + 1))
                     case "$p" in *'Permission denied'*|*'Operation not permitted'*) denied=$((denied + 1)) ;; esac
-                    printf '[SCAN ERROR] %s\n' "$p"; continue ;;
+                    scan_display "[SCAN ERROR] $p"; continue ;;
                 '!EXIT!'*)
-                    [ "$p" = '!EXIT!0' ] || printf '[SCAN INCOMPLETE] find exit status: %s\n' "${p#'!EXIT!'}"
+                    [ "$p" = '!EXIT!0' ] || scan_display "[SCAN INCOMPLETE] find exit status: ${p#'!EXIT!'}"
                     continue ;;
             esac
             if [ -d "$p" ]; then
@@ -110,12 +150,12 @@ collect_paths() {
                     cmake|git|arm-none-eabi-gcc|openocd|STM32CubeMX|ninja)
                         CANDIDATES+=("$p")
                         candidates=$((candidates + 1))
-                        printf '[CANDIDATE] %s\n' "$p" ;;
+                        scan_display "[CANDIDATE] $p" ;;
                     *) count=$((count + 1)); directory=$p ;;
                 esac
             fi
             if [ "$SECONDS" -ne "$last" ]; then
-                printf '[SCAN %ss] directories=%s candidates=%s denied=%s errors=%s | %s\n' "$((SECONDS - started))" "$count" "$candidates" "$denied" "$errors" "$directory"
+                scan_display "[SCAN $((SECONDS - started))s] dirs=$count tools=$candidates denied=$denied err=$errors | $directory"
                 last=$SECONDS
             fi
         done < <(
@@ -134,7 +174,7 @@ collect_paths() {
             printf '!EXIT!%s\0' "$scan_exit"
         )
     done
-    printf '[SCAN DONE %ss] directories=%s candidates=%s denied=%s errors=%s\n' "$((SECONDS - started))" "$count" "$candidates" "$denied" "$errors"
+    scan_display "[SCAN DONE $((SECONDS - started))s] directories=$count candidates=$candidates denied=$denied errors=$errors"
 }
 read_version() {
     local pid watchdog result
@@ -178,7 +218,7 @@ check_candidate() {
             label=MATCH
             [ -n "${FOUND[$i]}" ] || FOUND[$i]=$p
         fi
-        printf '[%s] %s | %s | %s\n' "$label" "$base" "${version%%$'\n'*}" "$p"
+        ui_status "[$label] $base | ${version%%$'\n'*} | $p"
         if [ "$ok" -eq 0 ] && [ "$base" != STM32CubeMX ]; then OLD_NAMES+=("$base"); OLD_PATHS+=("$p"); fi
     done
 }
@@ -226,6 +266,10 @@ plan() {
     local i
     banner 'Embedded toolchain | installation plan'
     for i in 0 1 2 3 4 5; do
+        if [ "${FORCE_TOOLS[$i]:-0}" = 1 ]; then
+            ui_status "[FORCE REINSTALL] ${NAMES[$i]} (replace even if version matches)"
+            continue
+        fi
         if [ -n "${FOUND[$i]}" ]; then
             if [ "$VERSIONS_CHECKED" -eq 0 ] && [ "${NAMES[$i]}" != STM32CubeMX ]; then printf '[FOUND / VERSION CHECK PENDING] %s | %s\n' "${NAMES[$i]}" "${FOUND[$i]}"
             else printf '%s[FOUND / SKIP] %-20s %s%s\n' "$G" "${NAMES[$i]}" "${FOUND[$i]}" "$RESET"; fi
@@ -234,6 +278,29 @@ plan() {
     printf 'Targets: CMake 3.22.6 | Arm 13.3.rel1 | CubeMX 6.18.0 (optional)\n'
     printf 'Portable tools: %s\nGit/Ninja/OpenOCD: system package manager default location\n' "$ROOT"
     for p in ${OLD_PATHS[@]+"${OLD_PATHS[@]}"}; do printf '[REMOVE AFTER REPLACEMENT] %s\n' "$p"; done
+}
+select_force_reinstall() {
+    local i p j exists folder destination
+    banner 'Optional: reinstall matching tools / migrate old directory names'
+    ui_status '[INFO] Enter Y per tool to replace every discovered copy, including matching versions. Enter skips.'
+    ui_status '[INFO] Existing CubeMX is skipped; its setup wizard manages installation paths.'
+    for i in 0 1 2 3 5; do
+        [ -n "${FOUND[$i]}" ] || continue
+        folder=${NAMES[$i]}; [ "$folder" != arm-none-eabi-gcc ] || folder=arm-none-eabi
+        destination="$ROOT/$folder"
+        case "${NAMES[$i]}" in git|ninja|openocd) destination='the system/Homebrew package location' ;; esac
+        ui_status "[INFO] Current: ${FOUND[$i]}"
+        ask "Force reinstall ${NAMES[$i]} into $destination? [y/N]:"
+        case "$REPLY" in y|Y) ;; *) continue ;; esac
+        FORCE_TOOLS[$i]=1
+        for p in ${SEEN[@]+"${SEEN[@]}"}; do
+            [ "${p##*/}" = "${NAMES[$i]}" ] || continue
+            exists=0
+            for j in ${OLD_PATHS[@]+"${OLD_PATHS[@]}"}; do [ "$j" != "$p" ] || exists=1; done
+            if [ "$exists" -eq 0 ]; then OLD_NAMES+=("${NAMES[$i]}"); OLD_PATHS+=("$p"); fi
+        done
+        FOUND[$i]=''
+    done
 }
 resolve_executable() {
     local p=$1 target count=0 directory
@@ -379,10 +446,27 @@ install_archive() (
     output=$("$exe" --version 2>&1) || { printf '%s\n' "$output" >&2; exit 1; }
     printf '%s\n' "$output" | grep -Eq "$version" || { echo "Unexpected version: $output" >&2; exit 1; }
     printf '%s\n' "$output" >&2
-    relative=${exe#"$work/payload"}
-    dest="$ROOT/$name-${work##*.}"
-    [ ! -e "$dest" ] || exit 1
-    mv "$work/payload" "$dest" || exit 1
+    payload="$work/payload"
+    # Flatten a single vendor wrapper (retain macOS .app bundles intact).
+    entries=()
+    while IFS= read -r -d '' entry; do entries+=("$entry"); done < <(find "$payload" -mindepth 1 -maxdepth 1 -print0)
+    if [ "${#entries[@]}" -eq 1 ] && [ -d "${entries[0]}" ]; then
+        case "${entries[0]}" in *.app) ;; *) payload=${entries[0]} ;; esac
+    fi
+    relative=${exe#"$payload"}
+    folder=$name; [ "$name" != arm-none-eabi-gcc ] || folder=arm-none-eabi
+    dest="$ROOT/$folder"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        # Only remove an installation we own; never merge into unrelated files.
+        [ ! -L "$dest" ] && [ -f "$dest/.embedded-toolchain-owner" ] && [ "$(head -n 1 "$dest/.embedded-toolchain-owner")" = "$name" ] || {
+            echo "Fixed destination is occupied by an unverified directory; move it explicitly before retrying: $dest" >&2; exit 1;
+        }
+        other=$(find "$dest" -type f \( -name cmake -o -name git -o -name arm-none-eabi-gcc -o -name ninja -o -name openocd -o -name STM32CubeMX \) ! -name "$name" -print -quit) || exit 1
+        [ -z "$other" ] || { echo 'Fixed destination contains another tool; refusing deletion.' >&2; exit 1; }
+        confirm_write_scope "replace owned directory $dest with the validated new version" >&2 || exit 1
+        rm -rf -- "$dest" || exit 1
+    fi
+    mv "$payload" "$dest" || exit 1
     printf '%s\n' "$name" > "$dest/.embedded-toolchain-owner" || exit 1
     printf '%s\n' "$dest$relative"
 )
@@ -422,7 +506,14 @@ install_package() {
     else echo 'Unsupported package manager; install the missing package manually.' >&2; return 1; fi
 }
 install_cube() {
-    local p url archive work setup='' unpack format member
+    local p url archive work setup='' unpack format member choice
+    banner 'CubeMX installation options'
+    ui_status '[1] Download/extract and launch the setup wizard'
+    ui_status '[2] Download/extract only (READY; not installed)'
+    ui_status '[3] SKIP CubeMX (default)'
+    ask 'Choose an option [1/2/3; default 3]:'
+    choice=$REPLY
+    case "$choice" in 1|2) ;; *) STATUS[4]='SKIPPED (user choice)'; return 0 ;; esac
     if [ -z "$CUBE_INSTALLER" ]; then
         case "$PLATFORM:$(uname -m)" in
             Linux:x86_64)
@@ -464,8 +555,9 @@ install_cube() {
         fi
     fi
     if [ -z "$CUBE_INSTALLER" ]; then STATUS[4]='SKIPPED (optional ST login/manual download)'; return 0; fi
+    if [ "$choice" = 2 ]; then STATUS[4]="READY (not installed): $CUBE_INSTALLER"; printf 'Run this installer later: %s\n' "$CUBE_INSTALLER"; return 0; fi
     [ -e "$CUBE_INSTALLER" ] || { echo 'Installer does not exist.' >&2; return 1; }
-    printf 'Launching CubeMX setup; complete its installation wizard. Suggested destination: %s/STM32CubeMX\n' "$ROOT"
+    printf 'Launching CubeMX setup; choose this directory in the wizard: %s/stm32cubemx\n' "$ROOT"
     confirm_write_scope 'run the CubeMX installer wizard; its chosen destination and OS registration changes' || return 1
     if [ "$PLATFORM" = Darwin ]; then
         open -W "$CUBE_INSTALLER" || return 1
@@ -564,7 +656,12 @@ done
 SCAN_WORK=$(mktemp -d "$ROOT/.staging.runtime.XXXXXXXX") || exit 1
 confirm_write_scope 'execute discovered tools with --version for installation decisions; external programs are not OS-sandboxed' || exit 1
 check_discovered_versions
+select_force_reinstall
 plan
+if [ "${FORCE_TOOLS[0]+set}${FORCE_TOOLS[1]+set}${FORCE_TOOLS[2]+set}${FORCE_TOOLS[3]+set}${FORCE_TOOLS[5]+set}" != '' ]; then
+    ask 'Proceed with this replacement plan and old-copy cleanup? [y/N]:'
+    case "$REPLY" in y|Y) ;; *) exit 0 ;; esac
+fi
 for dependency in curl tar; do
     command -v "$dependency" >/dev/null 2>&1 || { echo "Install prerequisite: $dependency" >&2; exit 1; }
 done
@@ -620,6 +717,9 @@ for i in 0 1 2 3 4 5; do
 done
 save_path || { echo 'Failed to persist PATH.' >&2; FAILED=1; }
 banner Summary
-for i in 0 1 2 3 4 5; do printf '%-20s %s\n' "${NAMES[$i]}" "${STATUS[$i]}"; done
+for i in 0 1 2 3 4 5; do
+    printf -v summary_row '%-20s %s' "${NAMES[$i]}" "${STATUS[$i]}"
+    ui_status "$summary_row"
+done
 echo 'Open a new terminal. Staging downloads are retained for diagnosis.'
 exit "$FAILED"
